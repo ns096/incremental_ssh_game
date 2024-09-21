@@ -4,11 +4,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/timer"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
+
+	zone "github.com/lrstanley/bubblezone"
 )
 
 func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
@@ -62,6 +66,11 @@ https://github.com/charmbracelet/bubbletea/tree/master/tutorials/basics
 // sessionState is used to track which model is focused
 type sessionState uint
 
+type gameState struct {
+	amount int
+	quest  quest
+}
+
 const (
 	defaultTime              = time.Minute
 	timerView   sessionState = iota
@@ -94,20 +103,29 @@ var (
 				BorderForeground(lipgloss.Color("69"))
 	spinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("69"))
 	helpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	buttonStyle  = focusedModelStyle.Blink(true).Bold(true).Blink(true)
 )
 
 type mainModel struct {
-	state   sessionState
-	timer   timer.Model
-	spinner spinner.Model
-	index   int
-	term    string
+	state      sessionState
+	timer      timer.Model
+	spinner    spinner.Model
+	index      int
+	term       string
+	game_state gameState
 }
 
 func newModel(timeout time.Duration, term string) mainModel {
-	m := mainModel{state: timerView, term: term}
+	quest := createQuest("goblin", 10)
+	gameState := gameState{
+		0,
+		quest,
+	}
+	m := mainModel{state: timerView, term: term, game_state: gameState}
 	m.timer = timer.New(timeout)
 	m.spinner = spinner.New()
+
+	zone.NewGlobal()
 	return m
 }
 
@@ -149,12 +167,37 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.timer, cmd = m.timer.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+
 	case spinner.TickMsg:
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 	case timer.TickMsg:
 		m.timer, cmd = m.timer.Update(msg)
 		cmds = append(cmds, cmd)
+
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
+			if zone.Get("quest").InBounds(msg) {
+				m.game_state.amount += 1
+
+				m.game_state.quest = updateQuest(1, m.game_state.quest)
+
+			}
+
+			if zone.Get("timer").InBounds(msg) {
+				log.Info("Mouse Event:", fmt.Sprintf("%#v\n", msg))
+				m.state = timerView
+			}
+			if zone.Get("spinner").InBounds(msg) {
+				m.state = spinnerView
+			}
+
+		}
+	case progress.FrameMsg:
+		progressModel, cmd := m.game_state.quest.progress.Update(msg)
+		m.game_state.quest.progress = progressModel.(progress.Model)
+		return m, cmd
+
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -163,12 +206,23 @@ func (m mainModel) View() string {
 	var s string
 	model := m.currentFocusedModel()
 	if m.state == timerView {
-		s += lipgloss.JoinHorizontal(lipgloss.Top, focusedModelStyle.Render(fmt.Sprintf("%4s", m.timer.View())), modelStyle.Render(m.spinner.View()))
+		s += lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			zone.Mark("quest", questStyle.Render(viewQuest(m.game_state.quest))),
+			zone.Mark("timer", focusedModelStyle.Render(fmt.Sprintf("%4s", m.timer.View()))),
+			zone.Mark("spinner", modelStyle.Render(m.spinner.View())),
+		)
 	} else {
-		s += lipgloss.JoinHorizontal(lipgloss.Top, modelStyle.Render(fmt.Sprintf("%4s", m.timer.View())), focusedModelStyle.Render(m.spinner.View()))
+		s += lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			zone.Mark("quest", questStyle.Render(viewQuest(m.game_state.quest))),
+			zone.Mark("timer", modelStyle.Render(fmt.Sprintf("%4s", m.timer.View()))),
+			zone.Mark("spinner", focusedModelStyle.Render(m.spinner.View())),
+		)
 	}
+
 	s += helpStyle.Render(fmt.Sprintf("\ntab: focus next • n: new %s • q: exit\n", model))
-	return s
+	return zone.Scan(s)
 }
 
 func (m mainModel) currentFocusedModel() string {
